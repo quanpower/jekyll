@@ -1,6 +1,9 @@
+# frozen_string_literal: true
+
 module Jekyll
   class Collection
     attr_reader :site, :label, :metadata
+    attr_writer :docs
 
     # Create a new Collection.
     #
@@ -22,6 +25,24 @@ module Jekyll
       @docs ||= []
     end
 
+    # Override of normal respond_to? to match method_missing's logic for
+    # looking in @data.
+    def respond_to_missing?(method, include_private = false)
+      docs.respond_to?(method.to_sym, include_private) || super
+    end
+
+    # Override of method_missing to check in @data for the key.
+    def method_missing(method, *args, &blck)
+      if docs.respond_to?(method.to_sym)
+        Jekyll.logger.warn "Deprecation:",
+          "#{label}.#{method} should be changed to #{label}.docs.#{method}."
+        Jekyll.logger.warn "", "Called by #{caller(0..0)}."
+        docs.public_send(method.to_sym, *args, &blck)
+      else
+        super
+      end
+    end
+
     # Fetch the static files in this collection.
     # Defaults to an empty array if no static files have been read in.
     #
@@ -35,14 +56,12 @@ module Jekyll
     # Returns the sorted array of docs.
     def read
       filtered_entries.each do |file_path|
-        full_path = Jekyll.sanitized_path(directory, file_path)
+        full_path = collection_dir(file_path)
+        next if File.directory?(full_path)
         if Utils.has_yaml_header? full_path
-          doc = Jekyll::Document.new(full_path, { site: site, collection: self })
-          doc.read
-          docs << doc
+          read_document(full_path)
         else
-          relative_dir = File.join(relative_directory, File.dirname(file_path)).chomp("/.")
-          files << StaticFile.new(site, site.source, relative_dir, File.basename(full_path), self)
+          read_static_file(file_path, full_path)
         end
       end
       docs.sort!
@@ -53,10 +72,12 @@ module Jekyll
     # Returns an Array of file paths to the documents in this collection
     #   relative to the collection's directory
     def entries
-      return Array.new unless exists?
-      Dir.glob(File.join(directory, "**", "*.*")).map do |entry|
-        entry[File.join(directory, "")] = ''; entry
-      end
+      return [] unless exists?
+      @entries ||=
+        Utils.safe_glob(collection_dir, ["**", "*"], File::FNM_DOTMATCH).map do |entry|
+          entry["#{collection_dir}/"] = ""
+          entry
+        end
     end
 
     # Filtered version of the entries in this collection.
@@ -64,10 +85,14 @@ module Jekyll
     #
     # Returns a list of filtered entry paths.
     def filtered_entries
-      return Array.new unless exists?
-      Dir.chdir(directory) do
-        entry_filter.filter(entries).reject { |f| File.directory?(f) }
-      end
+      return [] unless exists?
+      @filtered_entries ||=
+        Dir.chdir(directory) do
+          entry_filter.filter(entries).reject do |f|
+            path = collection_dir(f)
+            File.directory?(path) || entry_filter.symlink?(f)
+          end
+        end
     end
 
     # The directory for this Collection, relative to the site source.
@@ -75,15 +100,28 @@ module Jekyll
     # Returns a String containing the directory name where the collection
     #   is stored on the filesystem.
     def relative_directory
-      "_#{label}"
+      @relative_directory ||= "_#{label}"
     end
 
-    # The full path to the directory containing the
+    # The full path to the directory containing the collection.
     #
     # Returns a String containing th directory name where the collection
     #   is stored on the filesystem.
     def directory
-      Jekyll.sanitized_path(site.source, relative_directory)
+      @directory ||= site.in_source_dir(relative_directory)
+    end
+
+    # The full path to the directory containing the collection, with
+    #   optional subpaths.
+    #
+    # *files - (optional) any other path pieces relative to the
+    #           directory to append to the path
+    #
+    # Returns a String containing th directory name where the collection
+    #   is stored on the filesystem.
+    def collection_dir(*files)
+      return directory if files.empty?
+      site.in_source_dir(relative_directory, *files)
     end
 
     # Checks whether the directory "exists" for this collection.
@@ -93,7 +131,7 @@ module Jekyll
     # Returns false if the directory doesn't exist or if it's a symlink
     #   and we're in safe mode.
     def exists?
-      File.directory?(directory) && !(File.symlink?(directory) && site.safe)
+      File.directory?(directory) && !entry_filter.symlink?(directory)
     end
 
     # The entry filter for this collection.
@@ -119,7 +157,7 @@ module Jekyll
     #
     # Returns a sanitized version of the label.
     def sanitize_label(label)
-      label.gsub(/[^a-z0-9_\-\.]/i, '')
+      label.gsub(%r![^a-z0-9_\-\.]!i, "")
     end
 
     # Produce a representation of this Collection for use in Liquid.
@@ -129,14 +167,7 @@ module Jekyll
     #
     # Returns a representation of this collection for use in Liquid.
     def to_liquid
-      metadata.merge({
-        "label"     => label,
-        "docs"      => docs,
-        "files"     => files,
-        "directory" => directory,
-        "output"    => write?,
-        "relative_directory" => relative_directory
-      })
+      Drops::CollectionDrop.new self
     end
 
     # Whether the collection's documents ought to be written as individual
@@ -144,26 +175,56 @@ module Jekyll
     #
     # Returns true if the 'write' metadata is true, false otherwise.
     def write?
-      !!metadata['output']
+      !!metadata.fetch("output", false)
     end
 
     # The URL template to render collection's documents at.
     #
     # Returns the URL template to render collection's documents at.
     def url_template
-      metadata.fetch('permalink', "/:collection/:path:output_ext")
+      @url_template ||= metadata.fetch("permalink") do
+        Utils.add_permalink_suffix("/:collection/:path", site.permalink_style)
+      end
     end
 
     # Extract options for this collection from the site configuration.
     #
     # Returns the metadata for this collection
     def extract_metadata
-      if site.config['collections'].is_a?(Hash)
-        site.config['collections'][label] || Hash.new
+      if site.config["collections"].is_a?(Hash)
+        site.config["collections"][label] || {}
       else
         {}
       end
     end
 
+    private
+
+    def read_document(full_path)
+      doc = Jekyll::Document.new(full_path, :site => site, :collection => self)
+      doc.read
+      if site.publisher.publish?(doc) || !write?
+        docs << doc
+      else
+        Jekyll.logger.debug "Skipped From Publishing:", doc.relative_path
+      end
+    end
+
+    private
+
+    def read_static_file(file_path, full_path)
+      relative_dir = Jekyll.sanitized_path(
+        relative_directory,
+        File.dirname(file_path)
+      ).chomp("/.")
+
+      files << StaticFile.new(
+        site,
+        site.source,
+        relative_dir,
+        File.basename(full_path),
+        self
+      )
+    end
   end
 end

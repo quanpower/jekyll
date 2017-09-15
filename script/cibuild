@@ -1,16 +1,19 @@
-#! /bin/bash
+#!/usr/bin/env bash
+
+script/branding
 
 set -e
 
-parallelize_tests() {
-  ls -1 script/{test,cucumber,proof} | xargs -P 3 -L 1 /bin/bash
-}
-
-serialize_tests() {
-  script/proof
-  script/test
+if [[ -z "$TEST_SUITE" ]]
+then
+  script/fmt
+  script/test ci
   script/cucumber
-}
-
-script/branding
-time parallelize_tests
+  script/default-site
+elif [[ -x "script/$TEST_SUITE" ]]
+then
+  script/$TEST_SUITE
+else
+  echo "Unknown test suite."
+  exit 1
+fi

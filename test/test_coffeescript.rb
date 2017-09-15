@@ -1,12 +1,12 @@
-require 'helper'
+# frozen_string_literal: true
 
-class TestCoffeeScript < Test::Unit::TestCase
+require "helper"
+
+class TestCoffeeScript < JekyllUnitTest
   context "converting CoffeeScript" do
     setup do
-      @site = Jekyll::Site.new(Jekyll.configuration({
-        "source" => source_dir,
-        "destination" => dest_dir
-      }))
+      External.require_with_graceful_fail("jekyll-coffeescript")
+      @site = fixture_site
       @site.process
       @test_coffeescript_file = dest_dir("js/coffeescript.js")
       @js_output = <<-JS
@@ -21,16 +21,16 @@ class TestCoffeeScript < Test::Unit::TestCase
       return square(x) * x;
     };
     cubes = (function() {
-      var _i, _len, _results;
-      _results = [];
-      for (_i = 0, _len = list.length; _i < _len; _i++) {
-        num = list[_i];
-        _results.push(math.cube(num));
+      var i, len, results;
+      results = [];
+      for (i = 0, len = list.length; i < len; i++) {
+        num = list[i];
+        results.push(math.cube(num));
       }
-      return _results;
+      return results;
     })();
-    if (typeof elvis !== \"undefined\" && elvis !== null) {
-      return alert(\"I knew it!\");
+    if (typeof elvis !== "undefined" && elvis !== null) {
+      return alert("I knew it!");
     }
   });
 
@@ -39,7 +39,7 @@ JS
     end
 
     should "write a JS file in place" do
-      assert File.exist?(@test_coffeescript_file), "Can't find the converted CoffeeScript file in the dest_dir."
+      assert_exist @test_coffeescript_file
     end
 
     should "produce JS" do
